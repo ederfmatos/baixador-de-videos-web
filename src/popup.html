@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>Baixador de Vídeos</title>
+  </head>
+  <body>
+    <header>
+      <h1>Vídeos detectados</h1>
+    </header>
+
+    <main>
+      <ul id="video-list" class="video-list"></ul>
+
+      <p id="empty" class="empty">
+        Nenhum vídeo detectado nesta aba. Reproduza um vídeo e reabra este
+        popup.
+      </p>
+    </main>
+
+    <footer>
+      <small>Baixa arquivos diretos (.mp4, .webm…) e streams HLS (.m3u8).</small>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
