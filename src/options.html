@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="options.css" />
+    <title>Opções — Baixador de Vídeos</title>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Opções</h1>
+
+      <section>
+        <h2>Domínios ignorados</h2>
+        <p class="muted">
+          Vídeos hospedados nestes domínios não são detectados nem contados no
+          badge. Útil para redes de anúncios e sites onde a extensão só atrapalha.
+          Subdomínios são incluídos automaticamente (<code>exemplo.com</code>
+          também cobre <code>cdn.exemplo.com</code>).
+        </p>
+
+        <form id="add-form" class="add-row">
+          <input
+            id="domain-input"
+            type="text"
+            placeholder="exemplo.com"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button type="submit" class="btn-primary">Adicionar</button>
+        </form>
+        <p id="input-error" class="error hidden"></p>
+
+        <ul id="domain-list" class="domain-list"></ul>
+        <p id="empty" class="muted">Nenhum domínio ignorado.</p>
+      </section>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>

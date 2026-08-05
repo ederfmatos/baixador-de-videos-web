@@ -99,10 +99,42 @@ main {
   display: none;
 }
 
+.link-btn {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 4px 14px 10px;
+  padding: 6px;
+  border: none;
+  background: transparent;
+  color: var(--primary);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
+}
+
 footer {
   padding: 8px 14px;
   border-top: 1px solid var(--border);
   color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.options-link {
+  color: var(--primary);
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.options-link:hover {
+  text-decoration: underline;
 }
 
 @media (prefers-color-scheme: dark) {

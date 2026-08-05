@@ -16,6 +16,16 @@
         <p class="muted">Analisando o stream…</p>
       </section>
 
+      <!-- Etapa: início (playlist de mídia, sem escolha de qualidade) -->
+      <section id="step-start" class="hidden">
+        <h2>Pronto para baixar</h2>
+        <p class="muted">
+          Escolha a pasta onde o vídeo será gravado. Ele é salvo direto no
+          disco, então não há limite de tamanho.
+        </p>
+        <button id="start-btn" class="btn-primary">Escolher pasta e baixar</button>
+      </section>
+
       <!-- Etapa: escolha de qualidade (playlist master) -->
       <section id="step-quality" class="hidden">
         <h2>Escolha a qualidade</h2>
@@ -30,6 +40,7 @@
         </div>
         <p id="progress-text" class="muted"></p>
         <p class="muted warn">Não feche esta aba até o download terminar.</p>
+        <button id="cancel-btn" class="btn-secondary">Cancelar download</button>
       </section>
 
       <!-- Etapa: concluído -->
@@ -47,6 +58,7 @@
       <p id="notes" class="notes hidden"></p>
     </main>
 
+    <script src="vendor/mux.js"></script>
     <script src="downloader.js"></script>
   </body>
 </html>

@@ -3,6 +3,10 @@
 
 const listEl = document.getElementById("video-list");
 const emptyEl = document.getElementById("empty");
+const toggleEl = document.getElementById("toggle-variants");
+const optionsEl = document.getElementById("open-options");
+
+let showVariants = false;
 
 function sanitizeFilename(name) {
   return (name || "video")
@@ -34,12 +38,12 @@ async function getActiveTab() {
   return tab;
 }
 
-async function handleDownload(video, tab) {
+async function handleDownload(video, tab, index) {
   const pageTitle = tab.title;
 
   if (video.kind === "hls") {
     // Streams HLS são baixados em uma página própria, com escolha de
-    // qualidade e barra de progresso (o contador é incrementado lá).
+    // qualidade, gravação em disco e barra de progresso.
     // A URL da página original vai junto para que o downloader envie o
     // Referer correto (evita HTTP 403 em servidores com anti-hotlink).
     const url =
@@ -48,30 +52,42 @@ async function handleDownload(video, tab) {
       `&title=${encodeURIComponent(video.title || pageTitle || "video")}` +
       `&referer=${encodeURIComponent(tab.url || "")}`;
     chrome.tabs.create({ url });
+    window.close();
     return;
   }
 
   const ext = extensionFromUrl(video.url);
-  const base = sanitizeFilename(video.title || pageTitle || "video");
+  // O índice evita que vários vídeos da mesma página disputem o mesmo nome.
+  const base = sanitizeFilename(video.title || pageTitle || "video") + (index > 0 ? ` (${index + 1})` : "");
   const filename = base.endsWith("." + ext) ? base : `${base}.${ext}`;
 
-  try {
-    await chrome.downloads.download({ url: video.url, filename });
-  } catch (e) {
-    console.error("Falha ao baixar:", e);
+  // O download é disparado pelo service worker: o popup fecha ao clicar e
+  // levaria junto qualquer requisição iniciada aqui.
+  const response = await chrome.runtime.sendMessage({
+    type: "DOWNLOAD_FILE",
+    url: video.url,
+    filename,
+  });
+
+  if (response && !response.ok) {
+    console.error("Falha ao baixar:", response.error);
   }
+  window.close();
 }
 
 function renderVideos(videos, tab) {
   listEl.innerHTML = "";
 
-  if (!videos.length) {
-    emptyEl.classList.remove("hidden");
-    return;
-  }
-  emptyEl.classList.add("hidden");
+  const hidden = videos.filter((v) => v.variant).length;
+  const visible = showVariants ? videos : videos.filter((v) => !v.variant);
 
-  videos.forEach((video, index) => {
+  if (!visible.length) {
+    emptyEl.classList.remove("hidden");
+  } else {
+    emptyEl.classList.add("hidden");
+  }
+
+  visible.forEach((video, index) => {
     const li = document.createElement("li");
     li.className = "video-item";
 
@@ -89,7 +105,8 @@ function renderVideos(videos, tab) {
     const sub = document.createElement("span");
     sub.className = "video-sub";
     const size = formatSize(video.size);
-    sub.textContent = size ? `${size} • ${video.source}` : video.source;
+    const parts = [size, video.source, video.variant ? "variante" : ""].filter(Boolean);
+    sub.textContent = parts.join(" • ");
 
     meta.appendChild(name);
     meta.appendChild(sub);
@@ -97,12 +114,23 @@ function renderVideos(videos, tab) {
     const btn = document.createElement("button");
     btn.className = "btn-primary";
     btn.textContent = "Baixar";
-    btn.addEventListener("click", () => handleDownload(video, tab));
+    btn.addEventListener("click", () => handleDownload(video, tab, index));
 
     li.appendChild(meta);
     li.appendChild(btn);
     listEl.appendChild(li);
   });
+
+  // Variantes de qualidade do mesmo stream ficam recolhidas para não poluir a
+  // lista, mas continuam acessíveis.
+  if (hidden > 0) {
+    toggleEl.classList.remove("hidden");
+    toggleEl.textContent = showVariants
+      ? "Ocultar variantes do mesmo vídeo"
+      : `Mostrar mais ${hidden} link(s) do mesmo vídeo`;
+  } else {
+    toggleEl.classList.add("hidden");
+  }
 }
 
 async function init() {
@@ -116,6 +144,16 @@ async function init() {
 
   const videos = (response && response.videos) || [];
   renderVideos(videos, tab);
+
+  toggleEl.addEventListener("click", () => {
+    showVariants = !showVariants;
+    renderVideos(videos, tab);
+  });
+
+  optionsEl.addEventListener("click", (e) => {
+    e.preventDefault();
+    chrome.runtime.openOptionsPage();
+  });
 }
 
 init();
