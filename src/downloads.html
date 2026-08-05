@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="downloads.css" />
+    <title>Downloads — Baixador de Vídeos</title>
+  </head>
+  <body>
+    <main class="card">
+      <header class="head">
+        <h1>Downloads de streams</h1>
+        <button id="clear-btn" class="btn-secondary">Limpar finalizados</button>
+      </header>
+
+      <p class="muted">
+        Downloads de streams HLS são gravados pela própria extensão e não
+        aparecem em <code>chrome://downloads</code>. Arquivos diretos
+        (.mp4, .webm) passam pelo Chrome e continuam lá, com pausa nativa.
+      </p>
+
+      <ul id="download-list" class="download-list"></ul>
+      <p id="empty" class="muted empty">Nenhum download de stream registrado.</p>
+    </main>
+
+    <script src="registry.js"></script>
+    <script src="downloads.js"></script>
+  </body>
+</html>

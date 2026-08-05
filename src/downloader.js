@@ -6,6 +6,10 @@
 // nada é acumulado em memória, então o tamanho do vídeo não é limitado pela
 // RAM disponível. Segmentos MPEG-TS passam pelo mux.js e saem como MP4.
 //
+// O download pode ser pausado, e sobrevive ao fechamento da aba: a cada
+// checkpoint o arquivo é fechado (o que confirma os bytes no disco) e o
+// estado vai para o IndexedDB, de onde a página de downloads o retoma.
+//
 // Não contorna DRM: streams com SAMPLE-AES / Widevine / FairPlay / PlayReady
 // são detectados e recusados com uma mensagem clara.
 
@@ -14,11 +18,19 @@ const RETRIES = 2;
 // Quantos segmentos podem estar baixados à frente do que já foi gravado.
 // Segura o consumo de memória sem deixar os workers ociosos.
 const MAX_LOOKAHEAD = 16;
+// De quantos em quantos segmentos o arquivo é fechado e reaberto. Um
+// FileSystemWritableFileStream grava num arquivo temporário e só transfere
+// para o destino no close() — sem esses checkpoints, uma aba encerrada no
+// meio perderia tudo e não haveria o que retomar.
+const CHECKPOINT_SEGMENTS = 25;
+// Frequência máxima de atualização do registro compartilhado.
+const RECORD_THROTTLE_MS = 500;
 
 const params = new URLSearchParams(location.search);
 const srcUrl = params.get("src") || "";
 const pageTitle = params.get("title") || "video";
 const refererUrl = params.get("referer") || "";
+const resumeId = params.get("resume") || "";
 
 const steps = {
   loading: document.getElementById("step-loading"),
@@ -37,6 +49,7 @@ const doneTextEl = document.getElementById("done-text");
 const errorTextEl = document.getElementById("error-text");
 const notesEl = document.getElementById("notes");
 const cancelBtn = document.getElementById("cancel-btn");
+const pauseBtn = document.getElementById("pause-btn");
 const startBtn = document.getElementById("start-btn");
 
 document.getElementById("video-title").textContent = pageTitle;
@@ -150,8 +163,7 @@ function parsePlaylist(text, baseUrl) {
   let mediaSequence = 0;
   let live = true;
 
-  // O número de sequência precisa de um contador próprio: usar o índice do
-  // array quebra em playlists com #EXT-X-DISCONTINUITY, e é ele que gera o IV
+  // O número de sequência precisa de um contador próprio: é ele que gera o IV
   // padrão da descriptografia AES-128.
   let sequence = null;
 
@@ -222,12 +234,12 @@ function checkDrm(playlist) {
 
 let headerRuleId = null;
 
-async function setupHeaderRule() {
-  if (!refererUrl || !chrome.declarativeNetRequest) return;
+async function setupHeaderRule(referer) {
+  if (!referer || !chrome.declarativeNetRequest) return;
 
   let origin;
   try {
-    origin = new URL(refererUrl).origin;
+    origin = new URL(referer).origin;
   } catch (e) {
     return;
   }
@@ -249,7 +261,7 @@ async function setupHeaderRule() {
         action: {
           type: "modifyHeaders",
           requestHeaders: [
-            { header: "Referer", operation: "set", value: refererUrl },
+            { header: "Referer", operation: "set", value: referer },
             { header: "Origin", operation: "set", value: origin },
           ],
         },
@@ -351,13 +363,40 @@ function createGate() {
   };
 }
 
+// Controle de pausa: workers e gravador passam por aqui antes de cada unidade
+// de trabalho, então pausar interrompe tanto o download quanto a gravação.
+function createPauseControl() {
+  let paused = false;
+  const gate = createGate();
+  return {
+    get paused() {
+      return paused;
+    },
+    pause() {
+      paused = true;
+    },
+    resume() {
+      paused = false;
+      gate.signal();
+    },
+    // Acorda quem estiver bloqueado, para que um cancelamento não fique preso
+    // esperando um resume que nunca vem.
+    wake() {
+      gate.signal();
+    },
+    async wait(halted) {
+      while (paused && !halted()) await gate.wait();
+    },
+  };
+}
+
 // Baixa em paralelo, mas entrega os segmentos ao `write` em ordem estrita e
 // descarta cada buffer logo após gravá-lo. Falha na primeira exceção em vez de
 // esperar a fila inteira terminar.
-async function streamSegments(segments, { signal, write, onProgress }) {
+async function streamSegments(segments, { signal, write, onProgress, onPause, pause, startIndex = 0 }) {
   const buffers = new Map();
-  let nextToFetch = 0;
-  let nextToWrite = 0;
+  let nextToFetch = startIndex;
+  let nextToWrite = startIndex;
   let failure = null;
 
   const produced = createGate();
@@ -366,6 +405,7 @@ async function streamSegments(segments, { signal, write, onProgress }) {
   const stop = () => {
     produced.signal();
     consumed.signal();
+    if (pause) pause.wake();
   };
   signal.addEventListener("abort", stop);
 
@@ -376,6 +416,7 @@ async function streamSegments(segments, { signal, write, onProgress }) {
       while (nextToFetch - nextToWrite >= MAX_LOOKAHEAD && !halted()) {
         await consumed.wait();
       }
+      if (pause) await pause.wait(halted);
       if (halted()) return;
 
       const i = nextToFetch++;
@@ -396,9 +437,17 @@ async function streamSegments(segments, { signal, write, onProgress }) {
         if (halted()) return;
         await produced.wait();
       }
+      // Ao pausar, grava um checkpoint antes de bloquear: assim o arquivo é
+      // confirmado no disco e a aba pode ser fechada sem perder o progresso.
+      if (pause && pause.paused) {
+        if (onPause) await onPause(nextToWrite);
+        await pause.wait(halted);
+      }
+      if (halted()) return;
+
       const data = buffers.get(nextToWrite);
       buffers.delete(nextToWrite);
-      await write(data, segments[nextToWrite]);
+      await write(data, segments[nextToWrite], nextToWrite);
       nextToWrite++;
       consumed.signal();
       onProgress(nextToWrite, segments.length, data.byteLength);
@@ -416,6 +465,7 @@ async function streamSegments(segments, { signal, write, onProgress }) {
 
   if (failure) throw failure;
   if (signal.aborted) throw new DOMException("Cancelado", "AbortError");
+  return nextToWrite;
 }
 
 // ---------------------------------------------------------------------------
@@ -429,14 +479,16 @@ function isFragmentedMp4(playlist) {
 }
 
 // Envolve o Transmuxer do mux.js: recebe um segmento TS e devolve os pedaços
-// de MP4 fragmentado correspondentes. O init segment sai só na primeira vez.
-function createRemuxer() {
+// de MP4 fragmentado correspondentes. O init segment sai só na primeira vez —
+// ao retomar um download já existe um no arquivo, e um segundo no meio o
+// corromperia, daí o parâmetro.
+function createRemuxer(initAlreadyWritten = false) {
   if (typeof muxjs === "undefined") {
     throw new Error("mux.js não pôde ser carregado; o remux para MP4 está indisponível.");
   }
   const transmuxer = new muxjs.mp4.Transmuxer({ remux: true });
   let output = [];
-  let initSent = false;
+  let initSent = initAlreadyWritten;
 
   transmuxer.on("data", (segment) => {
     if (!initSent) {
@@ -474,9 +526,33 @@ async function uniqueFileHandle(dirHandle, baseName, ext) {
   throw new Error("Não foi possível criar um nome de arquivo livre na pasta escolhida.");
 }
 
-async function downloadMediaPlaylist(url, dirHandle, signal, { audioOnly = false, suffix = "", baseName } = {}) {
-  const text = await fetchWithRetry(url, true, signal);
-  const playlist = parsePlaylist(text, url);
+// ---------------------------------------------------------------------------
+// Registro compartilhado (lista de downloads)
+// ---------------------------------------------------------------------------
+
+let record = null;
+let lastRecordWrite = 0;
+
+async function updateRecord(patch, { force = false } = {}) {
+  if (!record) return;
+  record = { ...record, ...patch };
+  const now = Date.now();
+  if (!force && now - lastRecordWrite < RECORD_THROTTLE_MS) return;
+  lastRecordWrite = now;
+  await Registry.saveRecord(record);
+}
+
+// ---------------------------------------------------------------------------
+// Núcleo do download
+// ---------------------------------------------------------------------------
+
+// `resume` traz os handles e o índice salvos no IndexedDB; sem ele o download
+// começa do zero e o arquivo é criado na pasta escolhida.
+async function downloadMediaPlaylist(playlistUrl, dirHandle, signal, options) {
+  const { audioOnly = false, suffix = "", baseName, pause, resume = null, onFileReady } = options;
+
+  const text = await fetchWithRetry(playlistUrl, true, signal);
+  const playlist = parsePlaylist(text, playlistUrl);
 
   if (playlist.type === "master") {
     throw new Error("Playlist inesperada (master dentro de master).");
@@ -494,30 +570,77 @@ async function downloadMediaPlaylist(url, dirHandle, signal, { audioOnly = false
   }
 
   const fmp4 = isFragmentedMp4(playlist);
-  const remuxer = fmp4 ? null : createRemuxer();
   const ext = fmp4 && audioOnly ? "m4a" : "mp4";
 
-  const { handle, name } = await uniqueFileHandle(dirHandle, `${baseName}${suffix}`, ext);
-  const writable = await handle.createWritable();
+  let fileHandle;
+  let name;
+  let startIndex = 0;
+  let written = 0;
+
+  if (resume) {
+    fileHandle = resume.fileHandle;
+    name = resume.filename;
+    startIndex = resume.nextIndex;
+    written = resume.bytesWritten;
+
+    if (startIndex >= playlist.segments.length) {
+      throw new Error("A playlist mudou desde a pausa e não há mais o que baixar.");
+    }
+  } else {
+    const created = await uniqueFileHandle(dirHandle, `${baseName}${suffix}`, ext);
+    fileHandle = created.handle;
+    name = created.name;
+  }
+
+  if (onFileReady) await onFileReady(name, playlist.segments.length);
+
+  const remuxer = fmp4 ? null : createRemuxer(startIndex > 0);
+
+  // keepExistingData + seek preservam o que já foi gravado antes da pausa.
+  let writable = await fileHandle.createWritable({ keepExistingData: startIndex > 0 });
+  if (written > 0) await writable.seek(written);
 
   showStep("progress");
   progressLabelEl.textContent = audioOnly ? "Baixando áudio…" : "Baixando segmentos…";
-  progressBarEl.style.width = "0%";
 
-  let written = 0;
+  // Fecha o arquivo (confirmando os bytes no disco) e o reabre no ponto certo.
+  async function checkpoint(nextIndex) {
+    await writable.close();
+    await Registry.saveResumeState({
+      id: record.id,
+      dirHandle,
+      fileHandle,
+      filename: name,
+      playlistUrl,
+      audioOnly,
+      suffix,
+      baseName,
+      nextIndex,
+      bytesWritten: written,
+      referer: refererUrl,
+      title: pageTitle,
+    });
+    writable = await fileHandle.createWritable({ keepExistingData: true });
+    await writable.seek(written);
+  }
 
   try {
     // fMP4 precisa do init segment (#EXT-X-MAP) antes de tudo; o TS carrega o
     // cabeçalho no próprio fluxo e o init sai do remuxer.
-    if (playlist.map) {
+    if (playlist.map && startIndex === 0) {
       const init = await fetchWithRetry(playlist.map.url, false, signal);
       await writable.write(init);
       written += init.byteLength;
     }
 
+    let sinceCheckpoint = 0;
+
     await streamSegments(playlist.segments, {
       signal,
-      write: async (data) => {
+      pause,
+      startIndex,
+      onPause: (index) => checkpoint(index),
+      write: async (data, segment, index) => {
         if (remuxer) {
           for (const chunk of remuxer.push(data)) {
             await writable.write(chunk);
@@ -527,18 +650,27 @@ async function downloadMediaPlaylist(url, dirHandle, signal, { audioOnly = false
           await writable.write(data);
           written += data.byteLength;
         }
+
+        if (++sinceCheckpoint >= CHECKPOINT_SEGMENTS) {
+          sinceCheckpoint = 0;
+          await checkpoint(index + 1);
+        }
       },
       onProgress: (done, total) => {
         const pct = Math.round((done / total) * 100);
         progressBarEl.style.width = pct + "%";
         progressTextEl.textContent = `${done} de ${total} segmentos • ${formatSize(written)} gravados`;
+        updateRecord({ done, total, bytes: written, filename: name });
       },
     });
 
     await writable.close();
+    await Registry.deleteResumeState(record.id);
     return { filename: name, size: written, remuxed: !fmp4 };
   } catch (e) {
-    // Fecha o handle e remove o arquivo parcial para não deixar lixo na pasta.
+    // Cancelamento ou falha: fecha o handle e remove o arquivo parcial.
+    // Pausar não passa por aqui — a pausa bloqueia o gravador depois de um
+    // checkpoint, deixando arquivo e estado de retomada intactos.
     try {
       await writable.abort();
     } catch (_) {
@@ -549,6 +681,7 @@ async function downloadMediaPlaylist(url, dirHandle, signal, { audioOnly = false
     } catch (_) {
       /* pode não existir */
     }
+    await Registry.deleteResumeState(record.id);
     throw e;
   }
 }
@@ -558,13 +691,33 @@ async function downloadMediaPlaylist(url, dirHandle, signal, { audioOnly = false
 // ---------------------------------------------------------------------------
 
 let controller = null;
+let pauseControl = null;
+
+function setPauseButton(paused) {
+  pauseBtn.textContent = paused ? "Retomar" : "Pausar";
+  progressLabelEl.textContent = paused ? "Pausado" : "Baixando segmentos…";
+}
+
+pauseBtn.addEventListener("click", async () => {
+  if (!pauseControl) return;
+  if (pauseControl.paused) {
+    pauseControl.resume();
+    setPauseButton(false);
+    await updateRecord({ state: "running" }, { force: true });
+  } else {
+    pauseControl.pause();
+    setPauseButton(true);
+    await updateRecord({ state: "paused" }, { force: true });
+  }
+});
 
 cancelBtn.addEventListener("click", () => {
   if (controller) controller.abort();
 });
 
 // Enquanto o download roda a aba não pode ser fechada: a gravação em disco
-// acontece aqui, não no service worker.
+// acontece aqui, não no service worker. O progresso até o último checkpoint
+// sobrevive e aparece como retomável na lista de downloads.
 window.addEventListener("beforeunload", (e) => {
   if (controller && !controller.signal.aborted) {
     e.preventDefault();
@@ -581,15 +734,42 @@ async function pickDirectory() {
   }
 }
 
-async function startDownload(variantUrl, audioUrl, label) {
-  const dirHandle = await pickDirectory();
-  if (!dirHandle) return;
-
+async function runDownload({ dirHandle, variantUrl, audioUrl, label, resume = null }) {
   controller = new AbortController();
-  const baseName = sanitizeFilename(pageTitle) + (label ? ` ${label}` : "");
+  pauseControl = createPauseControl();
+  const tab = await chrome.tabs.getCurrent();
+
+  const baseName = resume
+    ? resume.baseName
+    : sanitizeFilename(pageTitle) + (label ? ` ${label}` : "");
+
+  record = {
+    id: resume ? resume.id : Registry.newDownloadId(),
+    title: pageTitle,
+    quality: label || "",
+    filename: resume ? resume.filename : "",
+    state: "running",
+    done: resume ? resume.nextIndex : 0,
+    total: 0,
+    bytes: resume ? resume.bytesWritten : 0,
+    error: "",
+    startedAt: resume ? resume.startedAt || Date.now() : Date.now(),
+    tabId: tab ? tab.id : null,
+    playlistUrl: variantUrl,
+    referer: refererUrl,
+  };
+  await Registry.saveRecord(record);
+
+  setPauseButton(false);
+  pauseBtn.classList.remove("hidden");
 
   try {
-    const result = await downloadMediaPlaylist(variantUrl, dirHandle, controller.signal, { baseName });
+    const result = await downloadMediaPlaylist(variantUrl, dirHandle, controller.signal, {
+      baseName,
+      pause: pauseControl,
+      resume,
+      onFileReady: (name, total) => updateRecord({ filename: name, total }, { force: true }),
+    });
 
     let doneText = `Arquivo "${result.filename}" (${formatSize(result.size)}) salvo na pasta escolhida.`;
     if (result.remuxed) {
@@ -601,6 +781,7 @@ async function startDownload(variantUrl, audioUrl, label) {
         audioOnly: true,
         suffix: " (áudio)",
         baseName,
+        pause: pauseControl,
       });
       doneText +=
         ` O áudio deste stream é uma faixa separada e foi salvo como "${audio.filename}".` +
@@ -608,18 +789,29 @@ async function startDownload(variantUrl, audioUrl, label) {
         ` ffmpeg -i "${result.filename}" -i "${audio.filename}" -c copy saida.mp4`;
     }
 
+    await updateRecord({ state: "done", bytes: result.size }, { force: true });
     doneTextEl.textContent = doneText;
     showStep("done");
   } catch (e) {
     if (e && e.name === "AbortError") {
+      await updateRecord({ state: "canceled" }, { force: true });
       fail("Download cancelado. O arquivo parcial foi removido da pasta.");
       return;
     }
     console.error(e);
+    await updateRecord({ state: "error", error: friendlyError(e) }, { force: true });
     fail(friendlyError(e));
   } finally {
     controller = null;
+    pauseControl = null;
+    pauseBtn.classList.add("hidden");
   }
+}
+
+async function startDownload(variantUrl, audioUrl, label) {
+  const dirHandle = await pickDirectory();
+  if (!dirHandle) return;
+  await runDownload({ dirHandle, variantUrl, audioUrl, label });
 }
 
 function labelForVariant(variant) {
@@ -668,20 +860,61 @@ function renderQualityChoices(master) {
   });
 }
 
-async function init() {
-  if (!srcUrl) {
-    fail("Nenhuma URL de stream informada.");
+// Retomada: os handles vêm do IndexedDB, mas a permissão de escrita precisa
+// ser reconcedida depois que o navegador reinicia — e isso exige um gesto do
+// usuário, que é o clique em "Retomar" na lista de downloads.
+async function resumeDownload(id) {
+  const state = await Registry.getResumeState(id);
+  if (!state) {
+    fail("Não há mais estado salvo para retomar este download.");
     return;
   }
 
+  const stored = await Registry.getRecord(id);
+  document.getElementById("video-title").textContent = state.title || pageTitle;
+
+  const permission = await state.dirHandle.queryPermission({ mode: "readwrite" });
+  if (permission !== "granted") {
+    const granted = await state.dirHandle.requestPermission({ mode: "readwrite" });
+    if (granted !== "granted") {
+      fail("Sem permissão de escrita na pasta original. Conceda o acesso para retomar o download.");
+      return;
+    }
+  }
+
+  await setupHeaderRule(state.referer);
+
+  await runDownload({
+    dirHandle: state.dirHandle,
+    variantUrl: state.playlistUrl,
+    audioUrl: null,
+    label: stored ? stored.quality : "",
+    resume: { ...state, startedAt: stored ? stored.startedAt : Date.now(), baseName: state.baseName },
+  });
+}
+
+async function init() {
   if (!window.showDirectoryPicker) {
     fail("Este navegador não oferece a File System Access API, necessária para gravar o vídeo em disco.");
     return;
   }
 
+  if (resumeId) {
+    // A retomada precisa de um gesto do usuário para a permissão da pasta.
+    showStep("start");
+    startBtn.textContent = "Retomar download";
+    startBtn.addEventListener("click", () => resumeDownload(resumeId));
+    return;
+  }
+
+  if (!srcUrl) {
+    fail("Nenhuma URL de stream informada.");
+    return;
+  }
+
   try {
     // Instala a regra de Referer/Origin antes de qualquer requisição.
-    await setupHeaderRule();
+    await setupHeaderRule(refererUrl);
 
     const text = await fetchWithRetry(srcUrl, true);
     const playlist = parsePlaylist(text, srcUrl);

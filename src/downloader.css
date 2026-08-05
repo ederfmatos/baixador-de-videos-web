@@ -88,8 +88,13 @@ h2 {
   opacity: 0.9;
 }
 
-.btn-secondary {
+.controls {
+  display: flex;
+  gap: 8px;
   margin-top: 12px;
+}
+
+.btn-secondary {
   border: 1px solid var(--border);
   background: transparent;
   color: var(--muted);

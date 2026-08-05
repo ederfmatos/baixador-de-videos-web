@@ -5,6 +5,7 @@ const listEl = document.getElementById("video-list");
 const emptyEl = document.getElementById("empty");
 const toggleEl = document.getElementById("toggle-variants");
 const optionsEl = document.getElementById("open-options");
+const downloadsEl = document.getElementById("open-downloads");
 
 let showVariants = false;
 
@@ -153,6 +154,12 @@ async function init() {
   optionsEl.addEventListener("click", (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
+  });
+
+  downloadsEl.addEventListener("click", (e) => {
+    e.preventDefault();
+    chrome.tabs.create({ url: chrome.runtime.getURL("src/downloads.html") });
+    window.close();
   });
 }
 

@@ -126,6 +126,11 @@ footer {
   gap: 8px;
 }
 
+.footer-links {
+  display: flex;
+  gap: 10px;
+}
+
 .options-link {
   color: var(--primary);
   font-size: 12px;

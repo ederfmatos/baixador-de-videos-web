@@ -33,9 +33,33 @@ estrita, descartando o buffer em seguida. Os downloads acontecem em paralelo
 (4 conexões) com uma janela limitada de antecipação, então o consumo de RAM
 é constante independentemente do tamanho do vídeo.
 
-Por isso a aba de download precisa ficar aberta até o fim: é ela quem escreve
-no arquivo. Há um botão **Cancelar**, e o arquivo parcial é removido da pasta
-se o download for interrompido ou falhar.
+Por isso a aba de download precisa ficar aberta enquanto ele roda: é ela quem
+escreve no arquivo. Há botões de **Pausar/Retomar** e **Cancelar** — cancelar
+remove o arquivo parcial da pasta.
+
+## Lista de downloads, pausa e retomada
+
+Downloads de **arquivos diretos** passam pelo `chrome.downloads`, então
+aparecem em `chrome://downloads` com pausa e retomada nativas do navegador.
+
+Downloads de **streams HLS** são gravados pela própria extensão e não chegam
+ao gerenciador do Chrome. Para eles existe uma página própria (link
+**Downloads** no rodapé do popup) que lista todos os streams — em andamento,
+pausados, concluídos e falhos — com progresso ao vivo.
+
+- **Pausar/retomar na mesma aba**: o botão na página de download bloqueia
+  tanto o download quanto a gravação.
+- **Retomar depois de fechar a aba**: a cada 25 segmentos, e sempre que o
+  download é pausado, a extensão grava um *checkpoint* — fecha o arquivo
+  (o que confirma os bytes no disco) e guarda no IndexedDB os handles da
+  pasta e do arquivo junto com o índice do próximo segmento. Se a aba for
+  fechada, o download aparece como **Interrompido** na lista com um botão
+  **Retomar**, que reabre o arquivo em modo `keepExistingData`, posiciona a
+  escrita no fim e continua de onde parou.
+
+O checkpoint é necessário porque um `FileSystemWritableFileStream` grava num
+arquivo temporário e só transfere para o destino no `close()` — sem ele, uma
+aba encerrada no meio perderia tudo.
 
 ### Conversão para MP4
 
@@ -76,8 +100,15 @@ hospedados nesses domínios não são detectados nem contados no badge —
   mostra o comando pronto quando isso acontece. O mux.js remuxa faixas, mas
   não combina dois streams independentes em um único MP4.
 - **A aba de download precisa ficar aberta**: a gravação em disco acontece
-  nela, não no service worker. Fechar a aba cancela o download (o navegador
-  pede confirmação).
+  nela, não no service worker. Fechar a aba interrompe o download (o navegador
+  pede confirmação), mas ele fica retomável a partir do último checkpoint.
+- **Retomada depende do servidor**: a playlist é buscada de novo ao retomar.
+  Se as URLs dos segmentos tiverem token com validade curta, ou se a playlist
+  tiver mudado, a retomada falha e é preciso recomeçar.
+- **Retomada de streams MPEG-TS**: o remuxer é recriado do zero, reaproveitando
+  o cabeçalho MP4 já gravado. Funciona na prática, mas pode haver uma pequena
+  descontinuidade de timestamps no ponto da emenda. Streams fMP4 não têm esse
+  problema.
 - **DASH (`.mpd`)** ainda não é suportado.
 - Transmissões **ao vivo**: baixa apenas o trecho disponível no momento.
 - Não baixa `blob:` nem `data:` URIs diretamente (mas o stream HLS por trás
@@ -93,6 +124,8 @@ src/background.js          Service worker: detecção, estado de sessão, badge
 src/content.js             Varredura de <video>/<source> na DOM
 src/popup.html/css/js      UI do popup e disparo de downloads
 src/downloader.html/css/js Página de download HLS (qualidade, disco, remux)
+src/downloads.html/css/js  Lista de downloads de streams, com retomada
+src/registry.js            Registro em storage.local + handles no IndexedDB
 src/options.html/css/js    Lista de domínios ignorados
 src/vendor/mux.js          mux.js 7.1.0 — remux MPEG-TS → MP4 (Apache-2.0)
 icons/                     Ícones (16/48/128)
