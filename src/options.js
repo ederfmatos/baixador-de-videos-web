@@ -6,6 +6,7 @@ const input = document.getElementById("domain-input");
 const errorEl = document.getElementById("input-error");
 const listEl = document.getElementById("domain-list");
 const emptyEl = document.getElementById("empty");
+const askWhereEl = document.getElementById("ask-where");
 
 // Aceita "exemplo.com", "cdn.exemplo.com.br"; rejeita URLs completas, portas e
 // caminhos, que nunca casariam com o hostname comparado no background.
@@ -88,6 +89,14 @@ form.addEventListener("submit", async (e) => {
   await setBlacklist(updated);
   input.value = "";
   render(updated);
+});
+
+askWhereEl.addEventListener("change", () => {
+  chrome.storage.local.set({ askWhereToSave: askWhereEl.checked });
+});
+
+chrome.storage.local.get("askWhereToSave").then(({ askWhereToSave = false }) => {
+  askWhereEl.checked = !!askWhereToSave;
 });
 
 getBlacklist().then(render);

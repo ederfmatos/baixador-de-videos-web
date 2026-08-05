@@ -59,12 +59,29 @@ main {
   flex: 1;
 }
 
+/* Campo de texto sem cara de campo: só ganha moldura ao focar. */
 .video-name {
   display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: 100%;
+  padding: 2px 4px;
+  margin: 0 0 1px -4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   font-weight: 500;
+  text-overflow: ellipsis;
+}
+
+.video-name:hover {
+  border-color: var(--border);
+}
+
+.video-name:focus {
+  outline: none;
+  border-color: var(--primary);
+  background: var(--bg);
 }
 
 .video-sub {

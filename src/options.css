@@ -55,6 +55,30 @@ code {
   font-size: 12px;
 }
 
+.toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  margin-bottom: 24px;
+}
+
+.toggle input {
+  margin-top: 2px;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+  width: 15px;
+  height: 15px;
+}
+
+.toggle small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 3px;
+}
+
 .add-row {
   display: flex;
   gap: 8px;

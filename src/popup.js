@@ -59,8 +59,8 @@ function bestTitle(video, pageMeta, tab) {
   return video.title || (tab && tab.title) || "video";
 }
 
-async function handleDownload(video, tab, pageMeta, index) {
-  const title = bestTitle(video, pageMeta, tab);
+async function handleDownload(video, tab, pageMeta, index, customName) {
+  const title = sanitizeFilename(customName) || bestTitle(video, pageMeta, tab);
 
   if (video.kind === "hls") {
     // Streams HLS são baixados em uma página própria, com escolha de
@@ -78,8 +78,10 @@ async function handleDownload(video, tab, pageMeta, index) {
   }
 
   const ext = extensionFromUrl(video.url);
-  // O índice evita que vários vídeos da mesma página disputem o mesmo nome.
-  const base = sanitizeFilename(title) + (index > 0 ? ` (${index + 1})` : "");
+  // O índice evita que vários vídeos da mesma página disputem o mesmo nome,
+  // mas um nome digitado pelo usuário é usado como está.
+  const suffix = customName || index === 0 ? "" : ` (${index + 1})`;
+  const base = sanitizeFilename(title) + suffix;
   const filename = base.endsWith("." + ext) ? base : `${base}.${ext}`;
 
   // O download é disparado pelo service worker: o popup fecha ao clicar e
@@ -94,6 +96,50 @@ async function handleDownload(video, tab, pageMeta, index) {
     console.error("Falha ao baixar:", response.error);
   }
   window.close();
+}
+
+// Quão provável é que este seja o vídeo principal da página. A ordem de
+// detecção não serve: o primeiro que a rede vê costuma ser um anúncio ou uma
+// variante de baixa qualidade.
+function mainVideoScore(video) {
+  return [
+    video.duration || 0, // duração do próprio elemento é o sinal mais forte
+    video.size || 0, // tamanho conhecido (só arquivos diretos)
+    (video.width || 0) * (video.height || 0),
+    video.source === "dom" ? 1 : 0, // um <video> na página vale mais que um XHR
+  ];
+}
+
+function compareByScore(a, b) {
+  const scoreA = mainVideoScore(a);
+  const scoreB = mainVideoScore(b);
+  for (let i = 0; i < scoreA.length; i++) {
+    if (scoreB[i] !== scoreA[i]) return scoreB[i] - scoreA[i];
+  }
+  return a.detectedAt - b.detectedAt; // empate: mantém a ordem de detecção
+}
+
+// Um grupo é o conjunto de URLs do mesmo diretório — as variantes de
+// qualidade de um stream. Mostra a melhor de cada grupo e recolhe o resto.
+function selectPrincipals(videos) {
+  const groups = new Map();
+  for (const video of videos) {
+    const key = video.group || video.url;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(video);
+  }
+
+  const principals = [];
+  const variants = [];
+  for (const members of groups.values()) {
+    const sorted = [...members].sort(compareByScore);
+    principals.push(sorted[0]);
+    variants.push(...sorted.slice(1));
+  }
+
+  principals.sort(compareByScore);
+  variants.sort(compareByScore);
+  return { principals, variants };
 }
 
 function buildThumb(video, pageMeta) {
@@ -112,8 +158,10 @@ function buildThumb(video, pageMeta) {
 function renderVideos(videos, tab, pageMeta) {
   listEl.innerHTML = "";
 
-  const hidden = videos.filter((v) => v.variant).length;
-  const visible = showVariants ? videos : videos.filter((v) => !v.variant);
+  const { principals, variants } = selectPrincipals(videos);
+  const hidden = variants.length;
+  const visible = showVariants ? [...principals, ...variants] : principals;
+  const variantUrls = new Set(variants.map((v) => v.url));
 
   emptyEl.classList.toggle("hidden", visible.length > 0);
 
@@ -127,10 +175,19 @@ function renderVideos(videos, tab, pageMeta) {
     const meta = document.createElement("div");
     meta.className = "video-meta";
 
-    const name = document.createElement("span");
+    // O nome é um campo editável desde o início, sem botão de "editar":
+    // basta clicar e digitar. O estilo só ganha borda no foco.
+    const name = document.createElement("input");
     name.className = "video-name";
-    name.textContent = bestTitle(video, pageMeta, tab);
+    name.type = "text";
+    name.spellcheck = false;
+    name.value = bestTitle(video, pageMeta, tab);
     name.title = video.url;
+    name.setAttribute("aria-label", "Nome do arquivo");
+    // Enter baixa direto, sem precisar ir até o botão.
+    name.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") handleDownload(video, tab, pageMeta, index, name.value);
+    });
 
     // Linha técnica: o que se sabe do vídeo, sem repetir o óbvio.
     const facts = [];
@@ -147,7 +204,9 @@ function renderVideos(videos, tab, pageMeta) {
 
     const origin = document.createElement("span");
     origin.className = "video-sub faint";
-    origin.textContent = [video.source, video.variant ? "variante" : ""].filter(Boolean).join(" • ");
+    origin.textContent = [video.source, variantUrls.has(video.url) ? "variante" : ""]
+      .filter(Boolean)
+      .join(" • ");
 
     meta.appendChild(name);
     meta.appendChild(specs);
@@ -156,7 +215,7 @@ function renderVideos(videos, tab, pageMeta) {
     const btn = document.createElement("button");
     btn.className = "btn-primary";
     btn.textContent = "Baixar";
-    btn.addEventListener("click", () => handleDownload(video, tab, pageMeta, index));
+    btn.addEventListener("click", () => handleDownload(video, tab, pageMeta, index, name.value));
 
     li.appendChild(meta);
     li.appendChild(btn);

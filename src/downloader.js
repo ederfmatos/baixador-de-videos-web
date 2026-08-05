@@ -52,6 +52,9 @@ const cancelBtn = document.getElementById("cancel-btn");
 const pauseBtn = document.getElementById("pause-btn");
 const startBtn = document.getElementById("start-btn");
 const startSummaryEl = document.getElementById("start-summary");
+const nameRowEl = document.getElementById("name-row");
+const filenameInputEl = document.getElementById("filename-input");
+const nameHintEl = document.getElementById("name-hint");
 
 document.getElementById("video-title").textContent = pageTitle;
 
@@ -59,6 +62,41 @@ function showStep(name) {
   for (const [key, el] of Object.entries(steps)) {
     el.classList.toggle("hidden", key !== name);
   }
+  // O campo de nome pertence às etapas em que ainda dá para mudá-lo.
+  nameRowEl.classList.toggle("hidden", name !== "start" && name !== "quality");
+}
+
+// O nome sugerido vem do título; se o usuário mexer, o que ele digitou vale
+// literalmente — inclusive sem o sufixo de qualidade que seria acrescentado.
+let nameEdited = false;
+
+filenameInputEl.addEventListener("input", () => {
+  nameEdited = true;
+  updateNameHint();
+});
+
+function chosenBaseName(qualityLabel) {
+  const typed = sanitizeFilename(filenameInputEl.value);
+  if (nameEdited && typed) return typed;
+  // Campo apagado (ou só com espaços) volta ao título da página; sem isso o
+  // nome ficaria começando com o sufixo de qualidade.
+  const base = typed || sanitizeFilename(pageTitle);
+  return base + (qualityLabel ? ` ${qualityLabel}` : "");
+}
+
+function updateNameHint() {
+  const typed = sanitizeFilename(filenameInputEl.value);
+  if (!typed) {
+    nameHintEl.textContent = "Sem nome, será usado o título da página.";
+    return;
+  }
+  if (typed !== filenameInputEl.value.trim()) {
+    nameHintEl.textContent = `Será salvo como "${typed}.mp4" — caracteres inválidos foram trocados.`;
+    return;
+  }
+  nameHintEl.textContent = nameEdited
+    ? "O sufixo de qualidade não é acrescentado a nomes personalizados."
+    : "";
 }
 
 function showNote(text) {
@@ -753,9 +791,7 @@ async function runDownload({ dirHandle, variantUrl, audioUrl, label, resume = nu
   pauseControl = createPauseControl();
   const tab = await chrome.tabs.getCurrent();
 
-  const baseName = resume
-    ? resume.baseName
-    : sanitizeFilename(pageTitle) + (label ? ` ${label}` : "");
+  const baseName = resume ? resume.baseName : chosenBaseName(label);
 
   record = {
     id: resume ? resume.id : Registry.newDownloadId(),
@@ -1008,9 +1044,13 @@ async function init() {
     return;
   }
 
+  filenameInputEl.value = sanitizeFilename(pageTitle);
+
   if (resumeId) {
     // A retomada precisa de um gesto do usuário para a permissão da pasta.
     showStep("start");
+    // O arquivo já existe no disco com o nome escolhido na primeira vez.
+    nameRowEl.classList.add("hidden");
     startBtn.textContent = "Retomar download";
     startBtn.addEventListener("click", () => resumeDownload(resumeId));
     return;

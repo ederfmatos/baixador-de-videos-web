@@ -19,8 +19,12 @@ reproduzidos em páginas da web:
 - Um **content script** varre a página em busca de tags `<video>`/`<source>`
   e coleta os metadados descritos abaixo.
 - O **popup** (ícone da extensão) lista os vídeos detectados na aba atual e
-  oferece um botão **Baixar** para cada um. Variantes de qualidade do mesmo
-  stream ficam recolhidas atrás de um link.
+  oferece um botão **Baixar** para cada um. A lista é ordenada por
+  probabilidade de ser o vídeo principal — duração, depois tamanho, depois
+  resolução, depois origem (um `<video>` na página vale mais que um XHR) —
+  e não por ordem de detecção, que costuma trazer um anúncio na frente.
+  Variantes de qualidade do mesmo stream ficam recolhidas atrás de um link,
+  representadas pela de melhor qualidade.
 - Streams HLS abrem a página `src/downloader.html`, que faz o parse da
   playlist, oferece as qualidades disponíveis (playlist master), pede a pasta
   de destino e grava os segmentos conforme chegam.
@@ -50,6 +54,23 @@ soma dos `#EXTINF` de cada playlist, buscadas em paralelo; o tamanho é
 `BANDWIDTH × duração`. Se alguma playlist falhar, aquela linha simplesmente
 fica sem a informação extra. Faixas de áudio e legendas presentes no stream
 também são listadas (legendas ainda não são baixadas).
+
+## Nome do arquivo
+
+O nome sugerido segue a cadeia acima, mas é sempre editável:
+
+- No **popup**, o nome é um campo de texto — clique e digite. `Enter` baixa
+  direto.
+- Na **página de download HLS**, há um campo *Nome do arquivo* nas telas de
+  início e de escolha de qualidade. Se você editar o nome, ele é usado
+  literalmente, sem o sufixo de qualidade que seria acrescentado ao nome
+  sugerido (`Meu vídeo 1080p.mp4`).
+- Nas **opções**, o interruptor *Perguntar onde salvar cada arquivo* faz os
+  arquivos diretos abrirem o diálogo do Chrome, onde dá para mudar nome e
+  pasta na hora.
+
+Caracteres inválidos em nome de arquivo (`/ \ : * ? " < > |`) são trocados
+por `_`, e o nome é limitado a 120 caracteres.
 
 ## Gravação em disco
 

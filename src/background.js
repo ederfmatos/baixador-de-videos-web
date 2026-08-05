@@ -155,19 +155,14 @@ async function addVideo(tabId, info) {
     Object.entries(info).filter(([, value]) => value !== undefined && value !== null && value !== "")
   );
 
-  // A primeira URL vista de um diretório é a "principal"; as seguintes são
-  // tratadas como variantes e ficam recolhidas no popup.
-  const dir = directoryKey(info.url);
-  const isFirstOfGroup =
-    existing.group !== undefined
-      ? !existing.variant
-      : !Array.from(map.values()).some((v) => v.group === dir);
-
+  // Só marca a que grupo a URL pertence. Qual delas é a principal e quais são
+  // variantes é decidido no popup, por qualidade — a ordem de chegada não diz
+  // nada, já que o primeiro que a rede vê costuma ser anúncio ou variante
+  // pequena.
   map.set(info.url, {
     ...existing,
     ...incoming,
-    group: dir,
-    variant: !isFirstOfGroup,
+    group: directoryKey(info.url),
     detectedAt: existing.detectedAt || Date.now(),
   });
   updateBadge(tabId);
@@ -309,8 +304,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // O popup fecha assim que o usuário clica, o que cancelaria um download
   // iniciado a partir dele. O worker é quem dispara o download.
   if (message.type === "DOWNLOAD_FILE") {
-    chrome.downloads
-      .download({ url: message.url, filename: message.filename })
+    // Com saveAs, o Chrome abre seu próprio diálogo de salvar, onde o nome
+    // sugerido ainda pode ser mudado e a pasta escolhida.
+    chrome.storage.local
+      .get("askWhereToSave")
+      .then(({ askWhereToSave = false }) =>
+        chrome.downloads.download({
+          url: message.url,
+          filename: message.filename,
+          saveAs: !!askWhereToSave,
+        })
+      )
       .then((id) => sendResponse({ ok: true, id }))
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
     return true;
