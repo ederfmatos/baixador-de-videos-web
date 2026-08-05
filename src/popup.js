@@ -30,8 +30,20 @@ function extensionFromUrl(url) {
 function formatSize(bytes) {
   if (!bytes) return "";
   const mb = bytes / (1024 * 1024);
+  if (mb >= 1024) return (mb / 1024).toFixed(2) + " GB";
   if (mb >= 1) return mb.toFixed(1) + " MB";
   return Math.max(1, Math.round(bytes / 1024)) + " KB";
+}
+
+function formatDuration(seconds) {
+  if (!seconds || !Number.isFinite(seconds)) return "";
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}min`;
+  if (m > 0) return `${m}min ${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
 }
 
 async function getActiveTab() {
@@ -39,8 +51,16 @@ async function getActiveTab() {
   return tab;
 }
 
-async function handleDownload(video, tab, index) {
-  const pageTitle = tab.title;
+// Melhor nome disponível, do mais específico para o mais genérico.
+function bestTitle(video, pageMeta, tab) {
+  if (video.serverFilename) return video.serverFilename.replace(/\.[a-z0-9]+$/i, "");
+  if (video.label) return video.label;
+  if (pageMeta && pageMeta.title) return pageMeta.title;
+  return video.title || (tab && tab.title) || "video";
+}
+
+async function handleDownload(video, tab, pageMeta, index) {
+  const title = bestTitle(video, pageMeta, tab);
 
   if (video.kind === "hls") {
     // Streams HLS são baixados em uma página própria, com escolha de
@@ -50,7 +70,7 @@ async function handleDownload(video, tab, index) {
     const url =
       chrome.runtime.getURL("src/downloader.html") +
       `?src=${encodeURIComponent(video.url)}` +
-      `&title=${encodeURIComponent(video.title || pageTitle || "video")}` +
+      `&title=${encodeURIComponent(title)}` +
       `&referer=${encodeURIComponent(tab.url || "")}`;
     chrome.tabs.create({ url });
     window.close();
@@ -59,7 +79,7 @@ async function handleDownload(video, tab, index) {
 
   const ext = extensionFromUrl(video.url);
   // O índice evita que vários vídeos da mesma página disputem o mesmo nome.
-  const base = sanitizeFilename(video.title || pageTitle || "video") + (index > 0 ? ` (${index + 1})` : "");
+  const base = sanitizeFilename(title) + (index > 0 ? ` (${index + 1})` : "");
   const filename = base.endsWith("." + ext) ? base : `${base}.${ext}`;
 
   // O download é disparado pelo service worker: o popup fecha ao clicar e
@@ -76,46 +96,67 @@ async function handleDownload(video, tab, index) {
   window.close();
 }
 
-function renderVideos(videos, tab) {
+function buildThumb(video, pageMeta) {
+  const src = video.poster || (pageMeta && pageMeta.poster);
+  if (!src) return null;
+  const img = document.createElement("img");
+  img.className = "thumb";
+  img.src = src;
+  img.alt = "";
+  img.loading = "lazy";
+  // Poster quebrado não pode deixar um buraco no layout.
+  img.addEventListener("error", () => img.remove());
+  return img;
+}
+
+function renderVideos(videos, tab, pageMeta) {
   listEl.innerHTML = "";
 
   const hidden = videos.filter((v) => v.variant).length;
   const visible = showVariants ? videos : videos.filter((v) => !v.variant);
 
-  if (!visible.length) {
-    emptyEl.classList.remove("hidden");
-  } else {
-    emptyEl.classList.add("hidden");
-  }
+  emptyEl.classList.toggle("hidden", visible.length > 0);
 
   visible.forEach((video, index) => {
     const li = document.createElement("li");
     li.className = "video-item";
+
+    const thumb = buildThumb(video, pageMeta);
+    if (thumb) li.appendChild(thumb);
 
     const meta = document.createElement("div");
     meta.className = "video-meta";
 
     const name = document.createElement("span");
     name.className = "video-name";
-    name.textContent =
-      video.kind === "hls"
-        ? `Vídeo ${index + 1} (stream HLS)`
-        : `Vídeo ${index + 1} (.${extensionFromUrl(video.url)})`;
+    name.textContent = bestTitle(video, pageMeta, tab);
     name.title = video.url;
 
-    const sub = document.createElement("span");
-    sub.className = "video-sub";
+    // Linha técnica: o que se sabe do vídeo, sem repetir o óbvio.
+    const facts = [];
+    facts.push(video.kind === "hls" ? "stream HLS" : "." + extensionFromUrl(video.url));
+    const duration = video.duration || (pageMeta && pageMeta.duration);
+    if (duration) facts.push(formatDuration(duration));
+    if (video.width && video.height) facts.push(`${video.width}×${video.height}`);
     const size = formatSize(video.size);
-    const parts = [size, video.source, video.variant ? "variante" : ""].filter(Boolean);
-    sub.textContent = parts.join(" • ");
+    if (size) facts.push(size);
+
+    const specs = document.createElement("span");
+    specs.className = "video-sub";
+    specs.textContent = facts.join(" • ");
+
+    const origin = document.createElement("span");
+    origin.className = "video-sub faint";
+    origin.textContent = [video.source, video.variant ? "variante" : ""].filter(Boolean).join(" • ");
 
     meta.appendChild(name);
-    meta.appendChild(sub);
+    meta.appendChild(specs);
+    meta.appendChild(origin);
 
     const btn = document.createElement("button");
     btn.className = "btn-primary";
     btn.textContent = "Baixar";
-    btn.addEventListener("click", () => handleDownload(video, tab, index));
+    btn.addEventListener("click", () => handleDownload(video, tab, pageMeta, index));
 
     li.appendChild(meta);
     li.appendChild(btn);
@@ -124,13 +165,11 @@ function renderVideos(videos, tab) {
 
   // Variantes de qualidade do mesmo stream ficam recolhidas para não poluir a
   // lista, mas continuam acessíveis.
+  toggleEl.classList.toggle("hidden", hidden === 0);
   if (hidden > 0) {
-    toggleEl.classList.remove("hidden");
     toggleEl.textContent = showVariants
       ? "Ocultar variantes do mesmo vídeo"
       : `Mostrar mais ${hidden} link(s) do mesmo vídeo`;
-  } else {
-    toggleEl.classList.add("hidden");
   }
 }
 
@@ -144,11 +183,12 @@ async function init() {
   });
 
   const videos = (response && response.videos) || [];
-  renderVideos(videos, tab);
+  const pageMeta = (response && response.pageMeta) || null;
+  renderVideos(videos, tab, pageMeta);
 
   toggleEl.addEventListener("click", () => {
     showVariants = !showVariants;
-    renderVideos(videos, tab);
+    renderVideos(videos, tab, pageMeta);
   });
 
   optionsEl.addEventListener("click", (e) => {

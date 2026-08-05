@@ -73,6 +73,28 @@ h2 {
   border-bottom: 1px solid var(--border);
 }
 
+.variant-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.variant-label {
+  font-weight: 500;
+}
+
+.variant-details {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.summary {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .btn-primary {
   background: var(--primary);
   color: var(--primary-fg);

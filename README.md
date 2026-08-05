@@ -16,7 +16,8 @@ reproduzidos em páginas da web:
   mídia (por `Content-Type` ou pela extensão do arquivo), incluindo
   manifestos HLS. O estado é mantido em `chrome.storage.session`, para
   sobreviver ao encerramento do worker.
-- Um **content script** varre a página em busca de tags `<video>`/`<source>`.
+- Um **content script** varre a página em busca de tags `<video>`/`<source>`
+  e coleta os metadados descritos abaixo.
 - O **popup** (ícone da extensão) lista os vídeos detectados na aba atual e
   oferece um botão **Baixar** para cada um. Variantes de qualidade do mesmo
   stream ficam recolhidas atrás de um link.
@@ -25,7 +26,32 @@ reproduzidos em páginas da web:
   de destino e grava os segmentos conforme chegam.
 - O número no **badge** do ícone mostra quantos vídeos foram detectados.
 
-### Gravação em disco
+### Metadados
+
+O popup mostra nome, duração, resolução, tamanho e uma miniatura, em vez de
+"Vídeo 1". As fontes, da mais específica para a mais genérica:
+
+- **Nome**: `Content-Disposition` do servidor → `title`/`aria-label` do
+  `<video>` ou heading próximo → `name` do JSON-LD `VideoObject` →
+  `og:title` → `document.title`. As três primeiras costumam dar o nome
+  limpo; `document.title` quase sempre vem com o sufixo do site colado.
+- **Duração e resolução**: do próprio elemento `<video>` (após
+  `loadedmetadata`), ou do JSON-LD / `og:video:duration`.
+- **Miniatura**: atributo `poster` do `<video>`, `thumbnailUrl` do JSON-LD
+  ou `og:image`.
+
+Metadados de página valem para a aba inteira, e não só para a URL que casa:
+a maioria dos streams é detectada pela rede, com uma URL que nunca aparece
+na DOM, então o título da página é a única identificação disponível.
+
+Na tela de escolha de qualidade, cada variante mostra **duração real e
+tamanho estimado**, além de codec, taxa de quadros e HDR. A duração vem da
+soma dos `#EXTINF` de cada playlist, buscadas em paralelo; o tamanho é
+`BANDWIDTH × duração`. Se alguma playlist falhar, aquela linha simplesmente
+fica sem a informação extra. Faixas de áudio e legendas presentes no stream
+também são listadas (legendas ainda não são baixadas).
+
+## Gravação em disco
 
 O vídeo **não é montado em memória**. A página de download pede uma pasta
 (File System Access API) e grava cada segmento assim que ele chega, em ordem

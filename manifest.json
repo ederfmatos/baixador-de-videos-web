@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Baixador de Vídeos da Web",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Detecta e baixa vídeos de páginas da web: arquivos diretos (.mp4, .webm, etc.) e streams HLS (.m3u8) com escolha de qualidade, gravação direta em disco e conversão para MP4.",
   "permissions": [
     "downloads",

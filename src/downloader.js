@@ -51,6 +51,7 @@ const notesEl = document.getElementById("notes");
 const cancelBtn = document.getElementById("cancel-btn");
 const pauseBtn = document.getElementById("pause-btn");
 const startBtn = document.getElementById("start-btn");
+const startSummaryEl = document.getElementById("start-summary");
 
 document.getElementById("video-title").textContent = pageTitle;
 
@@ -118,6 +119,7 @@ function parsePlaylist(text, baseUrl) {
   if (isMaster) {
     const variants = [];
     const audioRenditions = [];
+    const subtitles = [];
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -128,9 +130,13 @@ function parsePlaylist(text, baseUrl) {
           audioRenditions.push({
             groupId: attrs["GROUP-ID"] || "",
             name: attrs.NAME || "áudio",
+            language: attrs.LANGUAGE || "",
             isDefault: attrs.DEFAULT === "YES",
             url: resolveUrl(attrs.URI, baseUrl),
           });
+        }
+        if (attrs.TYPE === "SUBTITLES") {
+          subtitles.push({ name: attrs.NAME || "legenda", language: attrs.LANGUAGE || "" });
         }
       }
 
@@ -144,6 +150,8 @@ function parsePlaylist(text, baseUrl) {
               bandwidth: parseInt(attrs.BANDWIDTH || "0", 10) || 0,
               resolution: attrs.RESOLUTION || "",
               codecs: attrs.CODECS || "",
+              frameRate: parseFloat(attrs["FRAME-RATE"] || "0") || 0,
+              videoRange: attrs["VIDEO-RANGE"] || "",
               audioGroup: attrs.AUDIO || "",
             });
             break;
@@ -153,7 +161,7 @@ function parsePlaylist(text, baseUrl) {
     }
 
     variants.sort((a, b) => b.bandwidth - a.bandwidth);
-    return { type: "master", variants, audioRenditions };
+    return { type: "master", variants, audioRenditions, subtitles };
   }
 
   // Playlist de mídia (lista de segmentos).
@@ -170,6 +178,9 @@ function parsePlaylist(text, baseUrl) {
   // Passada sequencial: uma linha sem "#" logo após um #EXTINF é a URI do
   // segmento; a chave em vigor (#EXT-X-KEY) se aplica aos segmentos seguintes.
   let expectingSegment = false;
+  // A duração declarada em cada #EXTINF; somada, dá a duração do vídeo.
+  let pendingDuration = 0;
+  let duration = 0;
 
   for (const line of lines) {
     if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
@@ -194,6 +205,8 @@ function parsePlaylist(text, baseUrl) {
       }
     } else if (line.startsWith("#EXTINF:")) {
       expectingSegment = true;
+      // "#EXTINF:9.009,título opcional"
+      pendingDuration = parseFloat(line.slice("#EXTINF:".length).split(",")[0]) || 0;
     } else if (expectingSegment && !line.startsWith("#")) {
       if (sequence === null) sequence = mediaSequence;
       segments.push({
@@ -201,11 +214,12 @@ function parsePlaylist(text, baseUrl) {
         key: currentKey,
         sequence: sequence++,
       });
+      duration += pendingDuration;
       expectingSegment = false;
     }
   }
 
-  return { type: "media", segments, map, live };
+  return { type: "media", segments, map, live, duration };
 }
 
 function checkDrm(playlist) {
@@ -814,11 +828,68 @@ async function startDownload(variantUrl, audioUrl, label) {
   await runDownload({ dirHandle, variantUrl, audioUrl, label });
 }
 
+function formatDuration(seconds) {
+  if (!seconds || !Number.isFinite(seconds)) return "";
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}min`;
+  if (m > 0) return `${m}min ${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
+// Nome legível do codec de vídeo a partir do atributo CODECS.
+function codecName(codecs) {
+  const value = (codecs || "").toLowerCase();
+  if (/av01/.test(value)) return "AV1";
+  if (/hvc1|hev1/.test(value)) return "HEVC";
+  if (/avc1|h264/.test(value)) return "H.264";
+  if (/vp0?9/.test(value)) return "VP9";
+  return "";
+}
+
 function labelForVariant(variant) {
   const parts = [];
   if (variant.resolution) parts.push(variant.resolution);
   if (variant.bandwidth) parts.push(Math.round(variant.bandwidth / 1000) + " kbps");
   return parts.join(" • ") || "Qualidade padrão";
+}
+
+// Linha secundária: duração real (quando a playlist já foi lida), tamanho
+// estimado, codec, taxa de quadros e HDR.
+function detailsForVariant(variant) {
+  const parts = [];
+  if (variant.duration) parts.push(formatDuration(variant.duration));
+  if (variant.duration && variant.bandwidth) {
+    parts.push("~" + formatSize((variant.bandwidth / 8) * variant.duration));
+  }
+  const codec = codecName(variant.codecs);
+  if (codec) parts.push(codec);
+  if (variant.frameRate) parts.push(Math.round(variant.frameRate) + " fps");
+  if (variant.videoRange && variant.videoRange !== "SDR") parts.push(variant.videoRange);
+  return parts.join(" • ");
+}
+
+// Lê a playlist de cada variante só para somar os #EXTINF. São requisições
+// pequenas e paralelas; qualquer falha é silenciosa, porque isso é enfeite —
+// a tela precisa continuar utilizável se o servidor recusar.
+async function loadVariantDurations(variants, onUpdate) {
+  await Promise.all(
+    variants.map(async (variant) => {
+      try {
+        const text = await fetchWithRetry(variant.url, true);
+        const parsed = parsePlaylist(text, variant.url);
+        if (parsed.type === "media" && parsed.duration > 0) {
+          variant.duration = parsed.duration;
+          variant.segmentCount = parsed.segments.length;
+          onUpdate(variant);
+        }
+      } catch (e) {
+        /* sem duração para esta variante */
+      }
+    })
+  );
 }
 
 // Sufixo curto para o nome do arquivo: a altura da resolução, quando houver.
@@ -841,11 +912,25 @@ function renderQualityChoices(master) {
   showStep("quality");
   qualityListEl.innerHTML = "";
 
+  const detailNodes = new Map();
+
   master.variants.forEach((variant) => {
     const li = document.createElement("li");
 
+    const meta = document.createElement("div");
+    meta.className = "variant-meta";
+
     const label = document.createElement("span");
+    label.className = "variant-label";
     label.textContent = labelForVariant(variant);
+
+    const details = document.createElement("span");
+    details.className = "variant-details";
+    details.textContent = detailsForVariant(variant) || "lendo duração…";
+    detailNodes.set(variant, details);
+
+    meta.appendChild(label);
+    meta.appendChild(details);
 
     const btn = document.createElement("button");
     btn.className = "btn-primary";
@@ -854,9 +939,33 @@ function renderQualityChoices(master) {
       startDownload(variant.url, pickAudioUrl(variant, master.audioRenditions), filenameLabelFor(variant));
     });
 
-    li.appendChild(label);
+    li.appendChild(meta);
     li.appendChild(btn);
     qualityListEl.appendChild(li);
+  });
+
+  // Faixas de áudio e legendas presentes no stream.
+  const extras = [];
+  if (master.audioRenditions.length > 1) {
+    const names = master.audioRenditions.map((a) => a.language || a.name).filter(Boolean);
+    if (names.length) extras.push(`Faixas de áudio: ${[...new Set(names)].join(", ")}`);
+  }
+  if (master.subtitles && master.subtitles.length) {
+    const names = master.subtitles.map((s) => s.language || s.name).filter(Boolean);
+    if (names.length) {
+      extras.push(`Legendas disponíveis no stream: ${[...new Set(names)].join(", ")} (não são baixadas)`);
+    }
+  }
+  if (extras.length) showNote(extras.join(" · "));
+
+  // As durações chegam depois; cada uma atualiza sua linha assim que sai.
+  loadVariantDurations(master.variants, (variant) => {
+    const node = detailNodes.get(variant);
+    if (node) node.textContent = detailsForVariant(variant);
+  }).then(() => {
+    for (const [variant, node] of detailNodes) {
+      if (!variant.duration) node.textContent = detailsForVariant(variant);
+    }
   });
 }
 
@@ -928,6 +1037,12 @@ async function init() {
     } else {
       // Playlist de mídia direta: não há qualidade a escolher, mas o seletor
       // de pasta exige um clique do usuário.
+      const facts = [`${playlist.segments.length} segmentos`];
+      if (playlist.duration) facts.unshift(formatDuration(playlist.duration));
+      facts.push(isFragmentedMp4(playlist) ? "fMP4" : "MPEG-TS → MP4");
+      if (playlist.segments.some((s) => s.key)) facts.push("AES-128");
+      startSummaryEl.textContent = facts.join(" • ");
+
       showStep("start");
       startBtn.addEventListener("click", () => startDownload(srcUrl, null, ""));
     }

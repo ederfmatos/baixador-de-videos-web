@@ -16,19 +16,32 @@ const HLS_CONTENT_TYPES = [
 const MIN_VIDEO_BYTES = 100 * 1024;
 
 const STORAGE_KEY = "videosByTab";
+const META_KEY = "pageMetaByTab";
 
 // Map<tabId, Map<url, videoInfo>> — espelhado em chrome.storage.session.
 const videosByTab = new Map();
+
+// Map<tabId, pageMeta> — título limpo, poster e duração vindos do content
+// script. Vale para todos os vídeos da aba, inclusive os que só a detecção de
+// rede enxerga (streams cuja URL nunca aparece na DOM).
+const pageMetaByTab = new Map();
 
 // O worker pode ser reiniciado a qualquer momento; nenhum handler pode ler o
 // estado antes que o snapshot da sessão tenha sido recarregado.
 const ready = (async () => {
   try {
-    const stored = await chrome.storage.session.get(STORAGE_KEY);
+    const stored = await chrome.storage.session.get([STORAGE_KEY, META_KEY]);
     const snapshot = stored[STORAGE_KEY];
-    if (!snapshot) return;
-    for (const [tabId, videos] of Object.entries(snapshot)) {
-      videosByTab.set(Number(tabId), new Map(videos.map((v) => [v.url, v])));
+    if (snapshot) {
+      for (const [tabId, videos] of Object.entries(snapshot)) {
+        videosByTab.set(Number(tabId), new Map(videos.map((v) => [v.url, v])));
+      }
+    }
+    const meta = stored[META_KEY];
+    if (meta) {
+      for (const [tabId, value] of Object.entries(meta)) {
+        pageMetaByTab.set(Number(tabId), value);
+      }
     }
   } catch (e) {
     console.warn("Não foi possível restaurar o estado da sessão:", e);
@@ -47,7 +60,11 @@ function persist() {
     for (const [tabId, map] of videosByTab) {
       snapshot[tabId] = Array.from(map.values());
     }
-    chrome.storage.session.set({ [STORAGE_KEY]: snapshot }).catch(() => {});
+    const meta = {};
+    for (const [tabId, value] of pageMetaByTab) {
+      meta[tabId] = value;
+    }
+    chrome.storage.session.set({ [STORAGE_KEY]: snapshot, [META_KEY]: meta }).catch(() => {});
   }, 500);
 }
 
@@ -73,6 +90,22 @@ function extensionFromUrl(url) {
 function looksLikeVideoUrl(url) {
   const ext = extensionFromUrl(url);
   return VIDEO_EXTENSIONS.includes(ext);
+}
+
+// Nome real do arquivo, quando o servidor o informa. Cobre as duas formas:
+// filename*=UTF-8''nome%20real.mp4 (RFC 5987) e filename="nome real.mp4".
+function filenameFromDisposition(value) {
+  if (!value) return "";
+  const extended = /filename\*\s*=\s*[^']*'[^']*'([^;]+)/i.exec(value);
+  if (extended) {
+    try {
+      return decodeURIComponent(extended[1].trim());
+    } catch (e) {
+      /* codificação inválida */
+    }
+  }
+  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(value);
+  return plain ? plain[1].trim() : "";
 }
 
 // Diretório da URL (sem query nem nome do arquivo). Variantes de qualidade de
@@ -116,6 +149,12 @@ async function addVideo(tabId, info) {
   const map = getTabMap(tabId);
   const existing = map.get(info.url) || {};
 
+  // Detecção de rede e DOM veem o mesmo vídeo e cada uma sabe de coisas
+  // diferentes. Campos vazios não podem apagar o que a outra já preencheu.
+  const incoming = Object.fromEntries(
+    Object.entries(info).filter(([, value]) => value !== undefined && value !== null && value !== "")
+  );
+
   // A primeira URL vista de um diretório é a "principal"; as seguintes são
   // tratadas como variantes e ficam recolhidas no popup.
   const dir = directoryKey(info.url);
@@ -126,7 +165,7 @@ async function addVideo(tabId, info) {
 
   map.set(info.url, {
     ...existing,
-    ...info,
+    ...incoming,
     group: dir,
     variant: !isFirstOfGroup,
     detectedAt: existing.detectedAt || Date.now(),
@@ -141,10 +180,12 @@ chrome.webRequest.onHeadersReceived.addListener(
     const headers = details.responseHeaders || [];
     let contentType = "";
     let contentLength = 0;
+    let disposition = "";
     for (const h of headers) {
       const name = h.name.toLowerCase();
       if (name === "content-type") contentType = (h.value || "").split(";")[0].trim().toLowerCase();
       if (name === "content-length") contentLength = parseInt(h.value || "0", 10) || 0;
+      if (name === "content-disposition") disposition = h.value || "";
     }
 
     const ext = extensionFromUrl(details.url);
@@ -166,6 +207,7 @@ chrome.webRequest.onHeadersReceived.addListener(
         size: contentLength,
         source: "network",
         kind: "file",
+        serverFilename: filenameFromDisposition(disposition),
       });
     }
   },
@@ -178,6 +220,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (changeInfo.status === "loading" && changeInfo.url) {
     await ready;
     videosByTab.delete(tabId);
+    pageMetaByTab.delete(tabId);
     updateBadge(tabId);
     persist();
   }
@@ -186,6 +229,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await ready;
   videosByTab.delete(tabId);
+  pageMetaByTab.delete(tabId);
   persist();
 });
 
@@ -233,10 +277,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  // Metadados da página valem para a aba inteira: um stream detectado pela
+  // rede não tem título próprio, mas herda o da página que o reproduz.
+  if (message.type === "PAGE_META" && sender.tab) {
+    ready.then(() => {
+      const current = pageMetaByTab.get(sender.tab.id) || {};
+      const incoming = Object.fromEntries(
+        Object.entries(message.meta || {}).filter(([, v]) => v !== undefined && v !== null && v !== "")
+      );
+      // Só o frame principal define o título; iframes de player costumam ter
+      // título genérico e sobrescreveriam o bom.
+      if (sender.frameId !== 0 && current.title) delete incoming.title;
+      pageMetaByTab.set(sender.tab.id, { ...current, ...incoming });
+      persist();
+    });
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message.type === "GET_VIDEOS") {
     ready.then(() => {
       const map = videosByTab.get(message.tabId);
-      sendResponse({ videos: map ? Array.from(map.values()) : [] });
+      sendResponse({
+        videos: map ? Array.from(map.values()) : [],
+        pageMeta: pageMetaByTab.get(message.tabId) || null,
+      });
     });
     return true;
   }
