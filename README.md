@@ -108,6 +108,27 @@ O checkpoint é necessário porque um `FileSystemWritableFileStream` grava num
 arquivo temporário e só transfere para o destino no `close()` — sem ele, uma
 aba encerrada no meio perderia tudo.
 
+## Quando um download falha
+
+Erros são classificados em **temporários** (HTTP 4xx/5xx, queda de conexão,
+timeout) e **permanentes** (DRM, playlist inválida ou sem segmentos, mux.js
+indisponível). A distinção decide o que acontece com o arquivo parcial:
+
+- **Temporário**: o que já foi baixado é confirmado no disco e o ponto de
+  retomada é salvo. Aparece um botão **Tentar novamente** que continua do
+  segmento onde parou, sem rebaixar o que já veio, e sem pedir a pasta de
+  novo (a permissão já foi concedida naquela aba).
+- **Permanente**: tentar de novo daria o mesmo erro, então o botão não
+  aparece e o arquivo parcial é removido.
+
+O mesmo botão existe na lista de downloads, onde falhas ficam registradas com
+**Tentar novamente** (se houver ponto salvo) ou **Baixar de novo** (se a falha
+foi antes do primeiro checkpoint). Downloads falhos com ponto de retomada não
+somem no "Limpar finalizados".
+
+Para arquivos diretos, uma falha aparece embaixo do item no popup e o botão
+vira **Tentar novamente**, em vez de o popup fechar sem dizer nada.
+
 ### Conversão para MP4
 
 Segmentos MPEG-TS passam pelo [mux.js](https://github.com/videojs/mux.js)

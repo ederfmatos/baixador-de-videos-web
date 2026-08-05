@@ -93,6 +93,11 @@ main {
   text-overflow: ellipsis;
 }
 
+.video-sub.item-error {
+  color: var(--primary);
+  white-space: normal;
+}
+
 .video-sub.faint {
   font-size: 11px;
   opacity: 0.75;

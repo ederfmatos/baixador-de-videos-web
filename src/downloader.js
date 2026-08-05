@@ -55,6 +55,8 @@ const startSummaryEl = document.getElementById("start-summary");
 const nameRowEl = document.getElementById("name-row");
 const filenameInputEl = document.getElementById("filename-input");
 const nameHintEl = document.getElementById("name-hint");
+const retryBtn = document.getElementById("retry-btn");
+const retryHintEl = document.getElementById("retry-hint");
 
 document.getElementById("video-title").textContent = pageTitle;
 
@@ -104,8 +106,13 @@ function showNote(text) {
   notesEl.classList.remove("hidden");
 }
 
-function fail(message) {
+// `retry` descreve como refazer a tentativa; sem ele, o erro não tem volta e
+// o botão nem aparece.
+function fail(message, retry = null) {
   errorTextEl.textContent = message;
+  retryHintEl.textContent = retry ? retry.hint || "" : "";
+  retryBtn.classList.toggle("hidden", !retry);
+  retryBtn.onclick = retry ? retry.run : null;
   showStep("error");
 }
 
@@ -288,6 +295,9 @@ let headerRuleId = null;
 
 async function setupHeaderRule(referer) {
   if (!referer || !chrome.declarativeNetRequest) return;
+  // init() pode rodar de novo numa nova tentativa; sem isto, cada rodada
+  // reservaria um id novo e deixaria a regra anterior para trás.
+  if (headerRuleId !== null) return;
 
   let origin;
   try {
@@ -334,6 +344,21 @@ function removeHeaderRule() {
 }
 
 window.addEventListener("pagehide", removeHeaderRule);
+
+// Erros que tentar de novo não resolve: o problema está no conteúdo, não na
+// rede. Tudo que não cair aqui (HTTP 5xx, queda de conexão, timeout) vale
+// uma nova tentativa a partir do último checkpoint.
+function isPermanentError(e) {
+  const message = (e && e.message) || "";
+  return (
+    /protegido por DRM/.test(message) ||
+    /não é uma playlist M3U8 válida/.test(message) ||
+    /não contém segmentos/.test(message) ||
+    /Playlist inesperada/.test(message) ||
+    /nome de arquivo livre/.test(message) ||
+    /mux\.js não pôde ser carregado/.test(message)
+  );
+}
 
 function friendlyError(e) {
   const message = e && e.message ? e.message : String(e);
@@ -655,6 +680,9 @@ async function downloadMediaPlaylist(playlistUrl, dirHandle, signal, options) {
   showStep("progress");
   progressLabelEl.textContent = audioOnly ? "Baixando áudio…" : "Baixando segmentos…";
 
+  // Último segmento efetivamente gravado; -1 significa que nada saiu ainda.
+  let lastWrittenIndex = startIndex - 1;
+
   // Fecha o arquivo (confirmando os bytes no disco) e o reabre no ponto certo.
   async function checkpoint(nextIndex) {
     await writable.close();
@@ -703,6 +731,10 @@ async function downloadMediaPlaylist(playlistUrl, dirHandle, signal, options) {
           written += data.byteLength;
         }
 
+        // Guarda até onde o arquivo está íntegro, para o caso de uma falha
+        // logo adiante precisar salvar o ponto de retomada.
+        lastWrittenIndex = index;
+
         if (++sinceCheckpoint >= CHECKPOINT_SEGMENTS) {
           sinceCheckpoint = 0;
           await checkpoint(index + 1);
@@ -720,9 +752,41 @@ async function downloadMediaPlaylist(playlistUrl, dirHandle, signal, options) {
     await Registry.deleteResumeState(record.id);
     return { filename: name, size: written, remuxed: !fmp4 };
   } catch (e) {
-    // Cancelamento ou falha: fecha o handle e remove o arquivo parcial.
     // Pausar não passa por aqui — a pausa bloqueia o gravador depois de um
     // checkpoint, deixando arquivo e estado de retomada intactos.
+    const canRetry = e.name !== "AbortError" && !isPermanentError(e) && lastWrittenIndex >= startIndex;
+
+    if (canRetry) {
+      // Falha de rede no meio: confirma no disco o que já foi gravado e
+      // guarda o ponto, para que "Tentar novamente" continue daqui em vez de
+      // recomeçar do zero.
+      try {
+        await writable.close();
+        await Registry.saveResumeState({
+          id: record.id,
+          dirHandle,
+          fileHandle,
+          filename: name,
+          playlistUrl,
+          audioOnly,
+          suffix,
+          baseName,
+          nextIndex: lastWrittenIndex + 1,
+          bytesWritten: written,
+          referer: refererUrl,
+          title: pageTitle,
+        });
+        e.resumable = true;
+        e.resumedAt = lastWrittenIndex + 1;
+        throw e;
+      } catch (saveError) {
+        if (saveError === e) throw e;
+        // Não deu para salvar o ponto; cai na limpeza normal abaixo.
+      }
+    }
+
+    // Cancelamento, erro permanente ou falha antes do primeiro segmento:
+    // fecha o handle e remove o arquivo parcial.
     try {
       await writable.abort();
     } catch (_) {
@@ -848,9 +912,39 @@ async function runDownload({ dirHandle, variantUrl, audioUrl, label, resume = nu
       fail("Download cancelado. O arquivo parcial foi removido da pasta.");
       return;
     }
+
     console.error(e);
-    await updateRecord({ state: "error", error: friendlyError(e) }, { force: true });
-    fail(friendlyError(e));
+    const permanent = isPermanentError(e);
+    await updateRecord(
+      { state: "error", error: friendlyError(e), resumable: !!e.resumable },
+      { force: true }
+    );
+
+    if (permanent) {
+      // Nova tentativa daria o mesmo erro: o problema é o conteúdo.
+      fail(friendlyError(e));
+      return;
+    }
+
+    // Capturados agora: uma nova tentativa substitui `record`.
+    const downloadId = record.id;
+    const startedAt = record.startedAt;
+    fail(friendlyError(e), {
+      hint: e.resumable
+        ? `O que já foi baixado está salvo — a nova tentativa continua do segmento ${e.resumedAt}.`
+        : "A nova tentativa recomeça do início.",
+      run: async () => {
+        // A pasta já tem permissão concedida nesta aba; não pede de novo.
+        const saved = e.resumable ? await Registry.getResumeState(downloadId) : null;
+        await runDownload({
+          dirHandle,
+          variantUrl,
+          audioUrl,
+          label,
+          resume: saved ? { ...saved, startedAt } : null,
+        });
+      },
+    });
   } finally {
     controller = null;
     pauseControl = null;
@@ -1052,7 +1146,7 @@ async function init() {
     // O arquivo já existe no disco com o nome escolhido na primeira vez.
     nameRowEl.classList.add("hidden");
     startBtn.textContent = "Retomar download";
-    startBtn.addEventListener("click", () => resumeDownload(resumeId));
+    startBtn.onclick = () => resumeDownload(resumeId);
     return;
   }
 
@@ -1084,11 +1178,18 @@ async function init() {
       startSummaryEl.textContent = facts.join(" • ");
 
       showStep("start");
-      startBtn.addEventListener("click", () => startDownload(srcUrl, null, ""));
+      startBtn.onclick = () => startDownload(srcUrl, null, "");
     }
   } catch (e) {
     console.error(e);
-    fail(friendlyError(e));
+    // Falha ao ler a playlist: nada foi gravado ainda, então tentar de novo é
+    // simplesmente reabrir o fluxo desde o começo.
+    fail(
+      friendlyError(e),
+      isPermanentError(e)
+        ? null
+        : { hint: "Nada foi baixado ainda; a nova tentativa relê a playlist.", run: () => init() }
+    );
   }
 }
 

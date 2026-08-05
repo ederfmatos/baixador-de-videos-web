@@ -93,9 +93,30 @@ async function handleDownload(video, tab, pageMeta, index, customName) {
   });
 
   if (response && !response.ok) {
+    // Fechar aqui esconderia a falha: o usuário veria o popup sumir e nada
+    // acontecer. Mostra o erro e deixa o botão pronto para nova tentativa.
     console.error("Falha ao baixar:", response.error);
+    showItemError(video, response.error);
+    return;
   }
   window.close();
+}
+
+// Erro exibido embaixo do item que falhou, sem derrubar o resto da lista.
+function showItemError(video, message) {
+  const li = listEl.querySelector(`[data-url="${CSS.escape(video.url)}"]`);
+  if (!li) return;
+
+  let error = li.querySelector(".item-error");
+  if (!error) {
+    error = document.createElement("span");
+    error.className = "video-sub item-error";
+    li.querySelector(".video-meta").appendChild(error);
+  }
+  error.textContent = `Falhou: ${message}. Clique em Baixar para tentar de novo.`;
+
+  const btn = li.querySelector(".btn-primary");
+  if (btn) btn.textContent = "Tentar novamente";
 }
 
 // Quão provável é que este seja o vídeo principal da página. A ordem de
@@ -168,6 +189,7 @@ function renderVideos(videos, tab, pageMeta) {
   visible.forEach((video, index) => {
     const li = document.createElement("li");
     li.className = "video-item";
+    li.dataset.url = video.url;
 
     const thumb = buildThumb(video, pageMeta);
     if (thumb) li.appendChild(thumb);

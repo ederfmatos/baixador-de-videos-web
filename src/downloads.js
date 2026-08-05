@@ -113,15 +113,29 @@ async function renderRow(record) {
   const actions = document.createElement("div");
   actions.className = "actions";
 
-  // Só é retomável se ainda existir estado salvo no IndexedDB.
-  if (record.state === "interrupted") {
+  // Retomar e tentar novamente são a mesma operação: continuar do último
+  // checkpoint. Só muda o rótulo, conforme o download parou por si ou falhou.
+  if (record.state === "interrupted" || record.state === "error") {
     const state = await Registry.getResumeState(record.id);
     if (state) {
+      const label = record.state === "error" ? "Tentar novamente" : "Retomar";
       actions.appendChild(
-        makeButton("Retomar", "btn-primary", () => {
+        makeButton(label, "btn-primary", () => {
           chrome.tabs.create({
             url: chrome.runtime.getURL("src/downloader.html") + `?resume=${encodeURIComponent(record.id)}`,
           });
+        })
+      );
+    } else if (record.state === "error" && record.playlistUrl) {
+      // Sem estado salvo (falhou antes do primeiro checkpoint): recomeça.
+      actions.appendChild(
+        makeButton("Baixar de novo", "btn-primary", () => {
+          const url =
+            chrome.runtime.getURL("src/downloader.html") +
+            `?src=${encodeURIComponent(record.playlistUrl)}` +
+            `&title=${encodeURIComponent(record.title || "video")}` +
+            `&referer=${encodeURIComponent(record.referer || "")}`;
+          chrome.tabs.create({ url });
         })
       );
     }
@@ -162,8 +176,14 @@ async function render() {
 clearBtn.addEventListener("click", async () => {
   const records = await Registry.listRecords();
   for (const record of records) {
-    // "interrupted" com estado salvo é retomável; não some no "limpar".
-    if (record.state === "interrupted" && (await Registry.getResumeState(record.id))) continue;
+    // Com estado salvo ainda dá para retomar ou tentar de novo do ponto onde
+    // parou; esses não somem no "limpar".
+    if (
+      (record.state === "interrupted" || record.state === "error") &&
+      (await Registry.getResumeState(record.id))
+    ) {
+      continue;
+    }
     if (FINISHED.has(record.state)) await Registry.deleteRecord(record.id);
   }
   render();
